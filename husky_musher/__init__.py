@@ -1,5 +1,5 @@
 import logging
-from pythonjsonlogger import jsonlogger
+
 from id3c.logging.config import load_config
 
 

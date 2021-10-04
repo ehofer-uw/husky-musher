@@ -15,6 +15,7 @@ fields = [
     'enrollment_questionnaire_complete',
 ]
 
+
 records = PROJECT.records(raw = True, fields = fields, filter = '[netid] <> ""')
 print(f"{len(records):7,} records fetched")
 

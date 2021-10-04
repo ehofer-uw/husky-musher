@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "husky-musher"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = ">=3.8"
+id3c = {git = "https://github.com/seattleflu/id3c"}
+flask = "*"
+requests = "*"
+fsspec = "*"
+prometheus-flask-exporter = "*"
+diskcache = "*"
+python-json-logger = "*"
+gunicorn = "^20.1.0"
+Flask-Injector = "^0.13.0"
+injector = "^0.18.4"
+
+[tool.poetry.dev-dependencies]
+black = "^21.9b0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
