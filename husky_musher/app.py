@@ -1,23 +1,30 @@
-from pathlib import Path
+import os
+import logging
 
 import prometheus_flask_exporter
 from flask import Flask, Request, jsonify, redirect, render_template
 from flask_injector import FlaskInjector
-from injector import Injector
 from prometheus_flask_exporter.multiprocess import MultiprocessPrometheusMetrics
 from werkzeug.exceptions import InternalServerError
 
-from husky_musher import configure_logger
 from husky_musher.utils.redcap import *
 from husky_musher.utils.shibboleth import *
 
 
+class InvalidNetId(BadRequest):
+    detail = "Invalid NetID"
+    code = 400
+
+
 def create_app():
     app = Flask(__name__)
-    injector = Injector(modules=[RedcapInjectorModule])
-    FlaskInjector(app, injector=injector)
-    logging_config_file = os.path.join(os.environ.get('PWD'), "logging.yaml")
-    configure_logger(logging_config_file)
+    logging_config_file = os.path.join(os.getcwd(), "logging.yaml")
+
+    with open(logging_config_file, "rb") as file:
+        from id3c.logging import load_config
+        logging.config.dictConfig(load_config(file))
+
+    logger = logging.getLogger('gunicorn.error').getChild('app')
 
     # Setup Prometheus metrics collector.
     if "prometheus_multiproc_dir" in os.environ:
@@ -29,10 +36,6 @@ def create_app():
         )
 
         metrics.register_endpoint("/metrics")
-
-    class InvalidNetId(BadRequest):
-        detail = "Invalid NetID"
-        code = 400
 
     # Always include a Cache-Control: no-store header in the response so browsers
     # or intervening caches don't save pages across auth'd users.  Unlikely, but
@@ -62,8 +65,12 @@ def create_app():
     @app.route('/status')
     def status(settings: AppSettings):
         return jsonify(
-            {'version': settings.version}
-        )
+            {
+                'version': settings.version,
+                'deployment_id': settings.deployment_id,
+                'redcap_study_start_date': settings.redcap_study_start_date
+            }
+        ), 200
 
     @app.route("/")
     def main(request: Request, client: REDCapClient, settings: AppSettings):
@@ -110,3 +117,12 @@ def create_app():
             redcap_record["record_id"], event, instrument, repeat_instance
         )
         return redirect(survey_link)
+
+    FlaskInjector(app, modules=[RedcapInjectorModule]).injector.binder.bind(
+        logging.Logger, logger, singleton
+    )
+    return app
+
+
+if __name__ == "__main__":
+    create_app().run()

@@ -1,0 +1,41 @@
+name: Deploy new version
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: dev/eval/prod
+        required: true
+        default: dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: uwit-iam/common-build-scripts/actions/install-action@v0.1.6
+      - run: |
+          source ./.build-scripts/sources/bash-helpers.sh
+          source ./.build-scripts/sources/github-actions.sh
+
+          docker build . -t poetry-app --target dependencies
+
+          version=$(docker run poetry-app poetry version -s)
+          echo ::set-output name=version::$version
+
+          deployment_id="deploy-${stage}.$(tag_timestamp).v${version}"
+          echo ::set-output name=deployment-id:$deployment_id
+          image=${image_repo}:${version}
+          deployment=${image_repo}:${deployment_id}
+
+          docker build . -t $image --target app \
+            --build-arg APP_VERSION=${version}
+          docker build -t $deployment --target deployment \
+            --build-arg DEPLOYMENT_ID=${deployment_id} .
+
+          docker push $image
+          docker push $deployment
+
+        env:
+          stage: ${{ github.event.inputs.stage }}
+          image_repo: ghcr.io/${{ github.repository }}

@@ -17,6 +17,8 @@ python-json-logger = "*"
 gunicorn = "^20.1.0"
 Flask-Injector = "^0.13.0"
 injector = "^0.18.4"
+gevent = "^21.8.0"
+uw-saml = "^1.0.20"
 
 [tool.poetry.dev-dependencies]
 black = "^21.9b0"
