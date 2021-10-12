@@ -1,6 +1,5 @@
 import functools
 import json
-import os
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
@@ -10,27 +9,21 @@ import requests
 from diskcache import FanoutCache
 from id3c.cli.redcap import Project, is_complete
 from injector import Module, inject, provider, singleton
-from prometheus_client import CollectorRegistry, Summary
+from prometheus_client import Summary
+from prometheus_client.registry import CollectorRegistry
 from werkzeug.exceptions import BadRequest
 
 from husky_musher.settings import AppSettings
 
+
 class REDCapValue(Enum):
     YES = "1"
     COMPLETE = "2"
-    KIOSK_WALK_IN = "4"
+    KIOSK_WALK_IN = "4"   # TODO: Not needed?
 
 
-@singleton
 class REDCapRequestSecondsSummary(Summary):
-    @inject
-    def __init__(self, registry: CollectorRegistry):
-        super().__init__(
-            "redcap_request_seconds",
-            "Time spent making requests to REDCap",
-            labelnames=["function"],
-            registry=registry,
-        )
+    pass
 
 
 class FetchParticipantMetric(REDCapRequestSecondsSummary):
@@ -40,8 +33,18 @@ class FetchParticipantMetric(REDCapRequestSecondsSummary):
 class RedcapInjectorModule(Module):
     @provider
     @singleton
+    def provide_metric_summary(self, registry: CollectorRegistry) -> REDCapRequestSecondsSummary:
+        return REDCapRequestSecondsSummary(
+            "redcap_request_seconds",
+            documentation="Time spent making requests to REDCap",
+            labelnames=['function'],
+            registry=registry,
+        )
+
+    @provider
+    @singleton
     def provide_redcap_project(self, settings: AppSettings) -> Project:
-        return Project(settings.redcap_api_url, settings.project_id)
+        return Project(settings.redcap_api_url, settings.redcap_project_id, token=settings.redcap_api_token)
 
     @provider
     @singleton
@@ -57,8 +60,8 @@ class RedcapInjectorModule(Module):
 
     @provider
     @singleton
-    def provide_cache(self) -> FanoutCache:
-        return FanoutCache(os.environ.get("CACHE"))
+    def provide_cache(self, settings: AppSettings) -> FanoutCache:
+        return FanoutCache(settings.cache)
 
 
 def time_redcap_request(label: Optional[str] = None):
@@ -66,7 +69,7 @@ def time_redcap_request(label: Optional[str] = None):
         @functools.wraps(method)
         def inner(*args, **kwargs):
             instance: REDCapClient = args[0]
-            with instance.metric.labels(label or method.__name__).time():
+            with instance.metric_summary.labels(label or method.__name__).time():
                 return method(*args, **kwargs)
 
         return inner
@@ -83,13 +86,14 @@ class REDCapClient:
         cache: FanoutCache,
         project: Project,
         settings: AppSettings,
-        metric: FetchParticipantMetric,
+        fetch_participant_metric: FetchParticipantMetric,
     ):
         self.fetch_participant_metric = metric_summary.labels("fetch_participant")
         self.cache = cache
         self.project = project
         self.settings = settings
-        self.metric = metric
+        self.fetch_participant_metric = fetch_participant_metric
+        self.metric_summary = metric_summary
 
     @time_redcap_request("fetch_participant (cached)")
     def fetch_participant(self, user_info: Dict) -> Optional[Dict[str, str]]:
@@ -137,7 +141,7 @@ class REDCapClient:
                 if not records:
                     return None
 
-                if len(record) > 1:
+                if len(records) > 1:
                     raise BadRequest(
                         f'Multiple records exist with NetID "{netid}": '
                         f'{[r["record_id"] for r in records]}'
@@ -207,7 +211,7 @@ class REDCapClient:
         Returns the repeat instance number, i.e. days since the start of the study
         with the first instance starting at 1.
         """
-        return 1 + (datetime.today() - self.settings.study_start_date).days
+        return 1 + (datetime.today() - self.settings.redcap_study_start_date).days
 
     def redcap_registration_complete(self, redcap_record: dict) -> bool:
         """
@@ -657,8 +661,8 @@ class REDCapClient:
             {
                 "pid": self.project.id,
                 "id": redcap_record["record_id"],
-                "arm": "encounter_arm_1",
-                "event_id": EVENT_ID,
+                "arm": "musher_test_event_arm_1",
+                "event_id": self.settings.redcap_event_id,
                 "page": "kiosk_registration_4c7f",
                 "instance": instance,
             }
