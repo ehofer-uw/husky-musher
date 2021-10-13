@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - uses: uwit-iam/common-build-scripts/actions/install-action@v0.1.6
+      - uses: uwit-iam/common-build-scripts/install-action@0.1.6
       - run: |
           source ./.build-scripts/sources/bash-helpers.sh
           source ./.build-scripts/sources/github-actions.sh
