@@ -1,14 +1,24 @@
-import os
 import logging
+import os
+from typing import cast
 
-import prometheus_flask_exporter
-from flask import Flask, Request, jsonify, redirect, render_template
+from flask import Flask, render_template
 from flask_injector import FlaskInjector
-from prometheus_flask_exporter.multiprocess import MultiprocessPrometheusMetrics
-from werkzeug.exceptions import InternalServerError
+from flask_session import RedisSessionInterface, Session
+from injector import Injector
+from prometheus_flask_exporter import PrometheusMetrics
+from prometheus_flask_exporter.multiprocess import GunicornInternalPrometheusMetrics
+from redis import Redis
 
+from husky_musher.blueprints.app import AppBlueprint
+from husky_musher.blueprints.saml import MockSAMLBlueprint, SAMLBlueprint
+from husky_musher.utils.cache import MockRedis
 from husky_musher.utils.redcap import *
-from husky_musher.utils.shibboleth import *
+
+if os.environ.get("GUNICORN_LOG_LEVEL", None):
+    MetricsClientCls = GunicornInternalPrometheusMetrics
+else:
+    MetricsClientCls = PrometheusMetrics
 
 
 class InvalidNetId(BadRequest):
@@ -16,27 +26,32 @@ class InvalidNetId(BadRequest):
     code = 400
 
 
-def create_app():
-    app = Flask(__name__)
-    logging_config_file = os.path.join(os.getcwd(), "logging.yaml")
+def configure_metrics(app_injector: FlaskInjector, settings: AppSettings):
+    app = app_injector.app
+    injector_ = app_injector.injector
+    cls = PrometheusMetrics
+    if os.environ.get('GUNICORN_LOG_LEVEL'):  # If gunicorn is configured and in use
+        cls = GunicornInternalPrometheusMetrics
+    metrics = cls(
+        app,
+        defaults_prefix=f"{settings.app_name}_flask",
+    )
+    app.metrics = metrics
+    injector_.binder.bind(PrometheusMetrics, metrics, scope=singleton)
+    return metrics
 
-    with open(logging_config_file, "rb") as file:
-        from id3c.logging import load_config
-        logging.config.dictConfig(load_config(file))
 
-    logger = logging.getLogger('gunicorn.error').getChild('app')
-
-    # Setup Prometheus metrics collector.
-    if "prometheus_multiproc_dir" in os.environ:
-        metrics = MultiprocessPrometheusMetrics(
-            app,
-            defaults_prefix=prometheus_flask_exporter.NO_PREFIX,
-            default_latency_as_histogram=False,
-            excluded_paths=["^/static/"],
+def configure_session_cache(app: Flask, cache: Cache, settings: AppSettings):
+    if settings.redis_host:
+        app.session_interface = RedisSessionInterface(
+            redis=cache.redis,
+            key_prefix=f'{cache.prefix}sessions.'
         )
+    else:
+        Session(app)
 
-        metrics.register_endpoint("/metrics")
 
+def register_error_handlers(app: Flask):
     # Always include a Cache-Control: no-store header in the response so browsers
     # or intervening caches don't save pages across auth'd users.  Unlikely, but
     # possible.  This is also appropriate so that users always get a fresh REDCap
@@ -55,73 +70,73 @@ def create_app():
         netid = error.description
         error.description = "[redacted]"
         app.logger.error(f"Invalid NetID", exc_info=error)
-        return render_template("invalid_netid.html", netid=netid), 400
+        return render_template("invalid_netid.html", netid=netid), InvalidNetId.code
 
     @app.errorhandler(Exception)
     def handle_unexpected_error(error):
         app.logger.error(f"Unexpected error occurred: {error}", exc_info=error)
         return render_template("something_went_wrong.html"), 500
 
-    @app.route('/status')
-    def status(settings: AppSettings):
-        return jsonify(
-            {
-                'version': settings.version,
-                'deployment_id': settings.deployment_id,
-                'redcap_study_start_date': settings.redcap_study_start_date
-            }
-        ), 200
 
-    @app.route("/")
-    def main(request: Request, client: REDCapClient, settings: AppSettings):
-        # Get NetID and other attributes from Shibboleth data
-        if settings.in_development:
-            remote_user = os.environ.get("REMOTE_USER")
-            user_info = extract_user_info(dict(os.environ))
-        else:
-            remote_user = request.remote_user
-            user_info = extract_user_info(request.environ)
+class AppInjectorModule(Module):
+    @provider
+    @singleton
+    def provide_redis(self, settings: AppSettings) -> Redis:
+        if settings.redis_host:
+            return Redis(
+                host=settings.redis_host,
+                port=settings.redis_port,
+                username=settings.app_name,
+                password=settings.redis_password,
+            )
+        return cast(Redis, MockRedis())
 
-        if not (remote_user and user_info.get("netid")):
-            raise InternalServerError("No remote user!")
+    @provider
+    @singleton
+    def provide_app(
+        self,
+        injector_: Injector,
+        app_blueprint: AppBlueprint,
+    ) -> Flask:
+        app = Flask(__name__)
+        logging_config_file = os.path.join(os.getcwd(), "logging.yaml")
+        settings = injector_.get(AppSettings)
 
-        redcap_record = client.fetch_participant(user_info)
+        with open(logging_config_file, "rb") as file:
+            from id3c.logging import load_config
+            logging.config.dictConfig(load_config(file))
 
-        if not redcap_record:
-            # If not in REDCap project, create new record
-            new_record_id = client.register_participant(user_info)
-            redcap_record = {"record_id": new_record_id}
-
-        # Because of REDCap's survey queue logic, we can point a participant to an
-        # upstream survey. If they've completed it, REDCap will automatically direct
-        # them to the next, uncompleted survey in the queue.
-        event = "enrollment_arm_1"
-        instrument = "eligibility_screening"
-        repeat_instance = None
-
-        # If all enrollment event instruments are complete, point participants
-        # to today's daily attestation instrument.
-        # If the participant has already completed the daily attestation,
-        # REDCap will prevent the participant from filling out the survey again.
-        if client.redcap_registration_complete(redcap_record):
-            event = "encounter_arm_1"
-            instrument = "daily_attestation"
-            repeat_instance = client.get_todays_repeat_instance()
-
-            if repeat_instance <= 0:
-                # This should never happen!
-                raise InternalServerError("Failed to create a valid repeat instance")
-
-        # Generate a link to the appropriate questionnaire, and then redirect.
-        survey_link = client.generate_survey_link(
-            redcap_record["record_id"], event, instrument, repeat_instance
+        logger = logging.getLogger('gunicorn.error').getChild('app')
+        injector_.binder.bind(
+            logging.Logger, logger, singleton
         )
-        return redirect(survey_link)
+        blueprint_cls = MockSAMLBlueprint if settings.use_mock_idp else SAMLBlueprint
+        app.register_blueprint(injector_.get(blueprint_cls))
+        app.register_blueprint(app_blueprint)
+        flask_injector = FlaskInjector(app, injector=injector_)
 
-    FlaskInjector(app, modules=[RedcapInjectorModule]).injector.binder.bind(
-        logging.Logger, logger, singleton
-    )
-    return app
+        metrics = configure_metrics(flask_injector, settings)
+
+        configure_session_cache(app, injector_.get(Cache), settings)
+
+        # Setup Prometheus metrics collector.
+
+        register_error_handlers(app)
+        return app
+
+
+def create_app_injector() -> Injector:
+    modules = [
+        AppInjectorModule,
+        RedcapInjectorModule
+    ]
+    return Injector(modules)
+
+
+def create_app(injector_: Optional[Injector] = None):
+    if not injector_:
+        injector_ = create_app_injector()
+    return injector_.get(Flask)
 
 
 if __name__ == "__main__":

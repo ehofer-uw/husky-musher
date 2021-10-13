@@ -6,7 +6,6 @@ from typing import Dict, List, Optional
 from urllib.parse import urlencode, urljoin
 
 import requests
-from diskcache import FanoutCache
 from id3c.cli.redcap import Project, is_complete
 from injector import Module, inject, provider, singleton
 from prometheus_client import Summary
@@ -14,6 +13,7 @@ from prometheus_client.registry import CollectorRegistry
 from werkzeug.exceptions import BadRequest
 
 from husky_musher.settings import AppSettings
+from husky_musher.utils.cache import Cache
 
 
 class REDCapValue(Enum):
@@ -58,11 +58,6 @@ class RedcapInjectorModule(Module):
     ) -> FetchParticipantMetric:
         return summary.labels("fetch_participant")
 
-    @provider
-    @singleton
-    def provide_cache(self, settings: AppSettings) -> FanoutCache:
-        return FanoutCache(settings.cache)
-
 
 def time_redcap_request(label: Optional[str] = None):
     def decorator(method):
@@ -83,7 +78,7 @@ class REDCapClient:
     def __init__(
         self,
         metric_summary: REDCapRequestSecondsSummary,
-        cache: FanoutCache,
+        cache: Cache,
         project: Project,
         settings: AppSettings,
         fetch_participant_metric: FetchParticipantMetric,
@@ -105,7 +100,7 @@ class REDCapClient:
         given *user_info*.
         """
         netid = user_info["netid"]
-        record = self.cache.get(netid)
+        record = self.cache.get(netid, load_json=True)
 
         if not record:
             with self.fetch_participant_metric.time():
@@ -150,7 +145,7 @@ class REDCapClient:
                 record = records[0]
 
             if self.redcap_registration_complete(record):
-                self.cache[netid] = record
+                self.cache.set(netid, record)
 
         return record
 

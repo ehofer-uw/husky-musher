@@ -19,6 +19,8 @@ Flask-Injector = "^0.13.0"
 injector = "^0.18.4"
 gevent = "^21.8.0"
 uw-saml = "^1.0.20"
+redis = "^3.5.3"
+Flask-Session = "^0.4.0"
 
 [tool.poetry.dev-dependencies]
 black = "^21.9b0"
