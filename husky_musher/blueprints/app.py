@@ -65,7 +65,7 @@ class AppBlueprint(Blueprint):
         # If the participant has already completed the daily attestation,
         # REDCap will prevent the participant from filling out the survey again.
         if client.redcap_registration_complete(redcap_record):
-            current_week = str(get_the_current_week())
+            current_week = str(client.get_the_current_week())
             event = "week_" + current_week + "_arm_1"
             instrument = "test_form"
             repeat_instance = None
